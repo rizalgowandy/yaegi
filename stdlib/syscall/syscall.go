@@ -1,6 +1,3 @@
-//go:build go1.18
-// +build go1.18
-
 // Package syscall provide wrapper of standard library syscall package for native import in Yaegi.
 package syscall
 

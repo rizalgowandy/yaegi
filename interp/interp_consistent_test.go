@@ -1,11 +1,13 @@
 package interp_test
 
 import (
+	"bytes"
 	"go/build"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -13,6 +15,10 @@ import (
 	"github.com/traefik/yaegi/stdlib"
 	"github.com/traefik/yaegi/stdlib/unsafe"
 )
+
+var testsToSkipGo122 = map[string]bool{}
+
+var go122 = strings.HasPrefix(runtime.Version(), "go1.22")
 
 func TestInterpConsistencyBuild(t *testing.T) {
 	if testing.Short() {
@@ -36,6 +42,7 @@ func TestInterpConsistencyBuild(t *testing.T) {
 			file.Name() == "assign11.go" || // expect error
 			file.Name() == "assign12.go" || // expect error
 			file.Name() == "assign15.go" || // expect error
+			file.Name() == "assign19.go" || // expect error
 			file.Name() == "bad0.go" || // expect error
 			file.Name() == "break0.go" || // expect error
 			file.Name() == "cont3.go" || // expect error
@@ -48,6 +55,9 @@ func TestInterpConsistencyBuild(t *testing.T) {
 			file.Name() == "fun23.go" || // expect error
 			file.Name() == "fun24.go" || // expect error
 			file.Name() == "fun25.go" || // expect error
+			file.Name() == "gen7.go" || // expect error
+			file.Name() == "gen8.go" || // expect error
+			file.Name() == "gen9.go" || // expect error
 			file.Name() == "if2.go" || // expect error
 			file.Name() == "import6.go" || // expect error
 			file.Name() == "init1.go" || // expect error
@@ -68,6 +78,7 @@ func TestInterpConsistencyBuild(t *testing.T) {
 			file.Name() == "time0.go" || // display time (similar to random number)
 			file.Name() == "factor.go" || // bench
 			file.Name() == "fib.go" || // bench
+			file.Name() == "issue-1618.go" || // bench (infinite running)
 
 			file.Name() == "type5.go" || // used to illustrate a limitation with no workaround, related to the fact that the reflect package does not allow the creation of named types
 			file.Name() == "type6.go" || // used to illustrate a limitation with no workaround, related to the fact that the reflect package does not allow the creation of named types
@@ -86,6 +97,7 @@ func TestInterpConsistencyBuild(t *testing.T) {
 			file.Name() == "redeclaration-global5.go" || // expect error
 			file.Name() == "redeclaration-global6.go" || // expect error
 			file.Name() == "redeclaration-global7.go" || // expect error
+			file.Name() == "panic0.go" || // expect error
 			file.Name() == "pkgname0.go" || // has deps
 			file.Name() == "pkgname1.go" || // expect error
 			file.Name() == "pkgname2.go" || // has deps
@@ -106,6 +118,7 @@ func TestInterpConsistencyBuild(t *testing.T) {
 			file.Name() == "range9.go" || // expect error
 			file.Name() == "unsafe6.go" || // needs go.mod to be 1.17
 			file.Name() == "unsafe7.go" || // needs go.mod to be 1.17
+			file.Name() == "type24.go" || // expect error
 			file.Name() == "type27.go" || // expect error
 			file.Name() == "type28.go" || // expect error
 			file.Name() == "type29.go" || // expect error
@@ -113,6 +126,13 @@ func TestInterpConsistencyBuild(t *testing.T) {
 			file.Name() == "type31.go" || // expect error
 			file.Name() == "type32.go" || // expect error
 			file.Name() == "type33.go" { // expect error
+			continue
+		}
+		// Skip some tests which are problematic in go1.21 only.
+		if go121 && testsToSkipGo121[file.Name()] {
+			continue
+		}
+		if go122 && testsToSkipGo122[file.Name()] {
 			continue
 		}
 
@@ -172,7 +192,7 @@ func TestInterpConsistencyBuild(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			if string(outInterp) != string(outRun) {
+			if !bytes.Equal(outInterp, outRun) {
 				t.Errorf("\nGot: %q,\n want: %q", string(outInterp), string(outRun))
 			}
 		})
@@ -183,6 +203,7 @@ func TestInterpErrorConsistency(t *testing.T) {
 	testCases := []struct {
 		fileName       string
 		expectedInterp string
+		expectedStderr string
 		expectedExec   string
 	}{
 		{
@@ -213,7 +234,7 @@ func TestInterpErrorConsistency(t *testing.T) {
 		{
 			fileName:       "const9.go",
 			expectedInterp: "5:2: constant definition loop",
-			expectedExec:   "5:2: initialization loop for b",
+			expectedExec:   "5:2: initialization",
 		},
 		{
 			fileName:       "if2.go",
@@ -243,7 +264,7 @@ func TestInterpErrorConsistency(t *testing.T) {
 		{
 			fileName:       "issue-1093.go",
 			expectedInterp: "9:6: cannot use type untyped string as type int in assignment",
-			expectedExec:   `9:6: cannot use "a" + b() (value of type string) as type int in assignment`,
+			expectedExec:   `9:6: cannot use "a" + b() (value of type string)`,
 		},
 		{
 			fileName:       "op1.go",
@@ -272,25 +293,36 @@ func TestInterpErrorConsistency(t *testing.T) {
 		},
 		{
 			fileName:       "switch13.go",
-			expectedInterp: "9:2: i is not a type",
-			expectedExec:   "9:7: i (variable of type interface{}) is not a type",
+			expectedInterp: "is not a type",
+			expectedExec:   "is not a type",
 		},
 		{
 			fileName:       "switch19.go",
 			expectedInterp: "37:2: duplicate case Bir in type switch",
 			expectedExec:   "37:7: duplicate case Bir in type switch",
 		},
+		{
+			fileName:       "panic0.go",
+			expectedInterp: "stop!",
+			expectedStderr: `
+../_test/panic0.go:16:2: panic: main.baz(...)
+../_test/panic0.go:12:2: panic: main.bar(...)
+../_test/panic0.go:8:2: panic: main.foo(...)
+../_test/panic0.go:4:2: panic: main.main(...)
+`,
+		},
 	}
 
 	for _, test := range testCases {
 		t.Run(test.fileName, func(t *testing.T) {
-			if len(test.expectedInterp) == 0 && len(test.expectedExec) == 0 {
-				t.Fatal("at least expectedInterp must be define")
+			if test.expectedInterp == "" && test.expectedExec == "" {
+				t.Fatal("at least expectedInterp must be defined")
 			}
 
 			filePath := filepath.Join("..", "_test", test.fileName)
 
-			i := interp.New(interp.Options{GoPath: build.Default.GOPATH})
+			var stderr bytes.Buffer
+			i := interp.New(interp.Options{GoPath: build.Default.GOPATH, Stderr: &stderr})
 			if err := i.Use(stdlib.Symbols); err != nil {
 				t.Fatal(err)
 			}
@@ -303,6 +335,12 @@ func TestInterpErrorConsistency(t *testing.T) {
 			if !strings.Contains(errEval.Error(), test.expectedInterp) {
 				t.Errorf("got %q, want: %q", errEval.Error(), test.expectedInterp)
 			}
+			if test.expectedStderr != "" {
+				exp, got := strings.TrimSpace(test.expectedStderr), strings.TrimSpace(stderr.String())
+				if exp != got {
+					t.Errorf("got %q, want: %q", got, exp)
+				}
+			}
 
 			cmd := exec.Command("go", "run", filePath)
 			outRun, errExec := cmd.CombinedOutput()
@@ -311,7 +349,7 @@ func TestInterpErrorConsistency(t *testing.T) {
 				t.Fatal("An error is expected but got none.")
 			}
 
-			if len(test.expectedExec) == 0 && !strings.Contains(string(outRun), test.expectedInterp) {
+			if test.expectedExec == "" && !strings.Contains(string(outRun), test.expectedInterp) {
 				t.Errorf("got %q, want: %q", string(outRun), test.expectedInterp)
 			} else if !strings.Contains(string(outRun), test.expectedExec) {
 				t.Errorf("got %q, want: %q", string(outRun), test.expectedExec)

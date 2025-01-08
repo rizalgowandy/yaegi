@@ -11,27 +11,29 @@ type sKind uint
 
 // Symbol kinds for the Go interpreter.
 const (
-	undefSym sKind = iota
-	binSym         // Binary from runtime
-	bltnSym        // Builtin
-	constSym       // Constant
-	funcSym        // Function
-	labelSym       // Label
-	pkgSym         // Package
-	typeSym        // Type
-	varSym         // Variable
+	undefSym   sKind = iota
+	binSym           // Binary from runtime
+	bltnSym          // Builtin
+	constSym         // Constant
+	funcSym          // Function
+	labelSym         // Label
+	pkgSym           // Package
+	typeSym          // Type
+	varTypeSym       // Variable type (generic)
+	varSym           // Variable
 )
 
 var symKinds = [...]string{
-	undefSym: "undefSym",
-	binSym:   "binSym",
-	bltnSym:  "bltnSym",
-	constSym: "constSym",
-	funcSym:  "funcSym",
-	labelSym: "labelSym",
-	pkgSym:   "pkgSym",
-	typeSym:  "typeSym",
-	varSym:   "varSym",
+	undefSym:   "undefSym",
+	binSym:     "binSym",
+	bltnSym:    "bltnSym",
+	constSym:   "constSym",
+	funcSym:    "funcSym",
+	labelSym:   "labelSym",
+	pkgSym:     "pkgSym",
+	typeSym:    "typeSym",
+	varTypeSym: "varTypeSym",
+	varSym:     "varSym",
 }
 
 func (k sKind) String() string {
@@ -70,7 +72,6 @@ type symbol struct {
 //
 // In symbols, the index value corresponds to the index in scope.types, and at
 // execution to the index in frame, created exactly from the types layout.
-//
 type scope struct {
 	anc         *scope             // ancestor upper scope
 	child       []*scope           // included scopes
@@ -142,6 +143,14 @@ func (s *scope) lookup(ident string) (*symbol, int, bool) {
 		s = s.anc
 	}
 	return nil, 0, false
+}
+
+func (s *scope) isRedeclared(n *node) bool {
+	if !isNewDefine(n, s) {
+		return false
+	}
+	// Existing symbol in the scope indicates a redeclaration.
+	return s.sym[n.ident] != nil
 }
 
 func (s *scope) rangeChanType(n *node) *itype {

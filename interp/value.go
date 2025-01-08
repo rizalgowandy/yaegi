@@ -40,59 +40,13 @@ func valueOf(data []reflect.Value, i int) reflect.Value {
 	return data[i]
 }
 
-func genValueBinMethodOnInterface(n *node, defaultGen func(*frame) reflect.Value) func(*frame) reflect.Value {
-	if n == nil || n.child == nil || n.child[0] == nil ||
-		n.child[0].child == nil || n.child[0].child[0] == nil {
-		return defaultGen
-	}
-	c0 := n.child[0]
-	if c0.child[1] == nil || c0.child[1].ident == "" {
-		return defaultGen
-	}
-	value0 := genValue(c0.child[0])
-
-	return func(f *frame) reflect.Value {
-		v := value0(f)
-		var nod *node
-
-		for v.IsValid() {
-			// Traverse interface indirections to find out concrete type.
-			vi, ok := v.Interface().(valueInterface)
-			if !ok {
-				break
-			}
-			v = vi.value
-			nod = vi.node
-		}
-
-		if nod == nil || nod.typ.rtype == nil {
-			return defaultGen(f)
-		}
-
-		// Try to get the bin method, if it doesnt exist, fall back to
-		// the default generator function.
-		meth, ok := nod.typ.rtype.MethodByName(c0.child[1].ident)
-		if !ok {
-			return defaultGen(f)
-		}
-
-		return meth.Func
-	}
-}
-
-func genValueRecvIndirect(n *node) func(*frame) reflect.Value {
-	vr := genValueRecv(n)
-	return func(f *frame) reflect.Value {
-		v := vr(f)
-		if vi, ok := v.Interface().(valueInterface); ok {
-			return vi.value
-		}
-		return v.Elem()
-	}
-}
-
 func genValueRecv(n *node) func(*frame) reflect.Value {
-	v := genValue(n.recv.node)
+	var v func(*frame) reflect.Value
+	if n.recv.node == nil {
+		v = func(*frame) reflect.Value { return n.recv.val }
+	} else {
+		v = genValue(n.recv.node)
+	}
 	fi := n.recv.index
 
 	if len(fi) == 0 {
@@ -101,39 +55,19 @@ func genValueRecv(n *node) func(*frame) reflect.Value {
 
 	return func(f *frame) reflect.Value {
 		r := v(f)
-		if r.Kind() == reflect.Ptr {
-			r = r.Elem()
-		}
-		return r.FieldByIndex(fi)
-	}
-}
-
-func genValueBinRecv(n *node, recv *receiver) func(*frame) reflect.Value {
-	value := genValue(n)
-	binValue := genValue(recv.node)
-
-	v := func(f *frame) reflect.Value {
-		if def, ok := value(f).Interface().(*node); ok {
-			if def != nil && def.recv != nil && def.recv.val.IsValid() {
-				return def.recv.val
+		for _, i := range fi {
+			if r.Kind() == reflect.Ptr {
+				r = r.Elem()
+			}
+			// Note that we can't use reflect FieldByIndex method, as we may
+			// traverse valueInterface wrappers to access the embedded receiver.
+			r = r.Field(i)
+			vi, ok := r.Interface().(valueInterface)
+			if ok {
+				r = vi.value
 			}
 		}
-
-		ival, _ := binValue(f).Interface().(valueInterface)
-		return ival.value
-	}
-
-	fi := recv.index
-	if len(fi) == 0 {
-		return v
-	}
-
-	return func(f *frame) reflect.Value {
-		r := v(f)
-		if r.Kind() == reflect.Ptr {
-			r = r.Elem()
-		}
-		return r.FieldByIndex(fi)
+		return r
 	}
 }
 
@@ -145,6 +79,9 @@ func genValueAsFunctionWrapper(n *node) func(*frame) reflect.Value {
 		v := value(f)
 		if v.IsNil() {
 			return reflect.New(typ).Elem()
+		}
+		if v.Kind() == reflect.Func {
+			return v
 		}
 		vn, ok := v.Interface().(*node)
 		if ok && vn.rval.Kind() == reflect.Func {
@@ -176,7 +113,7 @@ func genValue(n *node) func(*frame) reflect.Value {
 		convertConstantValue(n)
 		v := n.rval
 		if !v.IsValid() {
-			v = reflect.New(interf).Elem()
+			v = reflect.New(emptyInterfaceType).Elem()
 		}
 		return func(f *frame) reflect.Value { return v }
 	case funcDecl:
@@ -221,9 +158,7 @@ func genDestValue(typ *itype, n *node) func(*frame) reflect.Value {
 	switch {
 	case isInterfaceSrc(typ) && (!isEmptyInterface(typ) || len(n.typ.method) > 0):
 		return genValueInterface(n)
-	case isFuncSrc(typ) && (n.typ.cat == valueT || n.typ.cat == nilT):
-		return genValueNode(n)
-	case typ.cat == valueT && isFuncSrc(n.typ):
+	case isNamedFuncSrc(n.typ):
 		return genFunctionWrapper(n)
 	case isInterfaceBin(typ):
 		return genInterfaceWrapper(n, typ.rtype)
@@ -235,6 +170,17 @@ func genDestValue(typ *itype, n *node) func(*frame) reflect.Value {
 		return genValueAs(n, typ.TypeOf())
 	}
 	return genValue(n)
+}
+
+func genFuncValue(n *node) func(*frame) reflect.Value {
+	value := genValue(n)
+	return func(f *frame) reflect.Value {
+		v := value(f)
+		if nod, ok := v.Interface().(*node); ok {
+			return genFunctionWrapper(nod)(f)
+		}
+		return v
+	}
 }
 
 func genValueArray(n *node) func(*frame) reflect.Value {
@@ -284,19 +230,6 @@ func genValueRangeArray(n *node) func(*frame) reflect.Value {
 			// for the range expression.
 			return reflect.ValueOf(value(f).Interface())
 		}
-	}
-}
-
-func genValueInterfaceArray(n *node) func(*frame) reflect.Value {
-	value := genValue(n)
-	return func(f *frame) reflect.Value {
-		vi := value(f).Interface().([]valueInterface)
-		v := reflect.MakeSlice(reflect.TypeOf([]interface{}{}), len(vi), len(vi))
-		for i, vv := range vi {
-			v.Index(i).Set(vv.value)
-		}
-
-		return v
 	}
 }
 
@@ -356,7 +289,7 @@ func getConcreteValue(val reflect.Value) reflect.Value {
 
 func zeroInterfaceValue() reflect.Value {
 	n := &node{kind: basicLit, typ: &itype{cat: nilT, untyped: true, str: "nil"}}
-	v := reflect.New(interf).Elem()
+	v := reflect.New(emptyInterfaceType).Elem()
 	return reflect.ValueOf(valueInterface{n, v})
 }
 
@@ -429,18 +362,6 @@ func genValueInterfaceValue(n *node) func(*frame) reflect.Value {
 			v = value(f)
 		}
 		return valueInterfaceValue(v)
-	}
-}
-
-func genValueNode(n *node) func(*frame) reflect.Value {
-	value := genValue(n)
-
-	return func(f *frame) reflect.Value {
-		v := value(f)
-		if _, ok := v.Interface().(*node); ok {
-			return v
-		}
-		return reflect.ValueOf(&node{rval: v})
 	}
 }
 

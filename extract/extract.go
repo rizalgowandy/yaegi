@@ -39,7 +39,9 @@ import (
 	"{{$key}}"
 	{{- end}}
 {{- end}}
+{{- if or .Val .Typ }}
 	"{{.ImportPath}}"
+{{- end}}
 	"reflect"
 )
 
@@ -85,8 +87,8 @@ func init() {
 			if W.WString == nil {
 				return ""
 			}
-			{{end -}}
-			{{$m.Ret}} W.W{{$m.Name}}{{$m.Arg}}
+			{{end}}
+			{{- $m.Ret}} W.W{{$m.Name}}{{$m.Arg -}}
 		}
 	{{end}}
 {{end}}
@@ -130,9 +132,18 @@ func matchList(name string, list []string) (match bool, err error) {
 	return
 }
 
+// Extractor creates a package with all the symbols from a dependency package.
+type Extractor struct {
+	Dest    string   // The name of the created package.
+	License string   // License text to be included in the created package, optional.
+	Exclude []string // Comma separated list of regexp matching symbols to exclude.
+	Include []string // Comma separated list of regexp matching symbols to include.
+	Tag     []string // Comma separated of build tags to be added to the created package.
+}
+
 func (e *Extractor) genContent(importPath string, p *types.Package) ([]byte, error) {
 	prefix := "_" + importPath + "_"
-	prefix = strings.NewReplacer("/", "_", "-", "_", ".", "_").Replace(prefix)
+	prefix = strings.NewReplacer("/", "_", "-", "_", ".", "_", "~", "_").Replace(prefix)
 
 	typ := map[string]string{}
 	val := map[string]Val{}
@@ -190,6 +201,10 @@ func (e *Extractor) genContent(importPath string, p *types.Package) ([]byte, err
 				val[name] = Val{pname, false}
 			}
 		case *types.Func:
+			// Skip generic functions and methods.
+			if s := o.Type().(*types.Signature); s.TypeParams().Len() > 0 || s.RecvTypeParams().Len() > 0 {
+				continue
+			}
 			val[name] = Val{pname, false}
 		case *types.Var:
 			val[name] = Val{pname, true}
@@ -198,9 +213,13 @@ func (e *Extractor) genContent(importPath string, p *types.Package) ([]byte, err
 			if t, ok := o.Type().(*types.Named); ok && t.TypeParams().Len() > 0 {
 				continue
 			}
-
 			typ[name] = pname
 			if t, ok := o.Type().Underlying().(*types.Interface); ok {
+				if t.NumMethods() == 0 && t.NumEmbeddeds() != 0 {
+					// Skip interfaces used to implement constraints for generics.
+					delete(typ, name)
+					continue
+				}
 				var methods []Method
 				for i := 0; i < t.NumMethods(); i++ {
 					f := t.Method(i)
@@ -283,11 +302,11 @@ func (e *Extractor) genContent(importPath string, p *types.Package) ([]byte, err
 	}
 
 	for _, t := range e.Tag {
-		if len(t) != 0 {
+		if t != "" {
 			buildTags += "," + t
 		}
 	}
-	if len(buildTags) != 0 && buildTags[0] == ',' {
+	if buildTags != "" && buildTags[0] == ',' {
 		buildTags = buildTags[1:]
 	}
 
@@ -340,7 +359,7 @@ func fixConst(name string, val constant.Value, imports map[string]bool) string {
 		str = f.Text('g', int(f.Prec()))
 	case constant.Complex:
 		// TODO: not sure how to parse this case
-		fallthrough
+		fallthrough //nolint:gocritic // Empty Fallthrough is expected.
 	default:
 		return name
 	}
@@ -349,15 +368,6 @@ func fixConst(name string, val constant.Value, imports map[string]bool) string {
 	imports["go/token"] = true
 
 	return fmt.Sprintf("constant.MakeFromLiteral(%q, token.%s, 0)", str, tok)
-}
-
-// Extractor creates a package with all the symbols from a dependency package.
-type Extractor struct {
-	Dest    string   // The name of the created package.
-	License string   // License text to be included in the created package, optional.
-	Exclude []string // Comma separated list of regexp matching symbols to exclude.
-	Include []string // Comma separated list of regexp matching symbols to include.
-	Tag     []string // Comma separated of build tags to be added to the created package.
 }
 
 // importPath checks whether pkgIdent is an existing directory relative to
@@ -377,7 +387,7 @@ func (e *Extractor) importPath(pkgIdent, importPath string) (string, error) {
 		return "", err
 	}
 	if err != nil {
-		if len(pkgIdent) > 0 && pkgIdent[0] == '.' {
+		if pkgIdent != "" && pkgIdent[0] == '.' {
 			// pkgIdent is definitely a relative path, not a package name, and it does not exist
 			return "", err
 		}
@@ -468,7 +478,7 @@ func GetMinor(part string) string {
 	return minor
 }
 
-const defaultMinorVersion = 19
+const defaultMinorVersion = 22
 
 func genBuildTags() (string, error) {
 	version := runtime.Version()

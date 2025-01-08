@@ -270,6 +270,7 @@ func (check typecheck) binaryExpr(n *node) error {
 		}
 	}
 
+	// Ensure that if values are untyped, both are converted to the same type
 	_ = check.convertUntyped(c0, c1.typ)
 	_ = check.convertUntyped(c1, c0.typ)
 
@@ -590,7 +591,7 @@ func (check typecheck) typeAssertionExpr(n *node, typ *itype) error {
 	// https://github.com/golang/go/issues/39717 lands. It is currently impractical to
 	// type check Named types as they cannot be asserted.
 
-	if n.typ.TypeOf().Kind() != reflect.Interface {
+	if rt := n.typ.TypeOf(); rt.Kind() != reflect.Interface && rt != valueInterfaceType {
 		return n.cfgErrorf("invalid type assertion: non-interface type %s on left", n.typ.id())
 	}
 	ims := n.typ.methods()
@@ -623,6 +624,11 @@ func (check typecheck) typeAssertionExpr(n *node, typ *itype) error {
 		}
 		if tm.recv != nil && tm.recv.TypeOf().Kind() == reflect.Ptr && typ.TypeOf().Kind() != reflect.Ptr {
 			return n.cfgErrorf("impossible type assertion: %s does not implement %s as %q method has a pointer receiver", typ.id(), n.typ.id(), name)
+		}
+
+		if im.cat != funcT || tm.cat != funcT {
+			// It only makes sense to compare in/out parameter types if both types are functions.
+			continue
 		}
 
 		err := n.cfgErrorf("impossible type assertion: %s does not implement %s", typ.id(), n.typ.id())
@@ -718,21 +724,24 @@ var builtinFuncs = map[string]struct {
 	args     int
 	variadic bool
 }{
-	bltnAppend:  {args: 1, variadic: true},
-	bltnCap:     {args: 1, variadic: false},
-	bltnClose:   {args: 1, variadic: false},
-	bltnComplex: {args: 2, variadic: false},
-	bltnImag:    {args: 1, variadic: false},
-	bltnCopy:    {args: 2, variadic: false},
-	bltnDelete:  {args: 2, variadic: false},
-	bltnLen:     {args: 1, variadic: false},
-	bltnMake:    {args: 1, variadic: true},
-	bltnNew:     {args: 1, variadic: false},
-	bltnPanic:   {args: 1, variadic: false},
-	bltnPrint:   {args: 0, variadic: true},
-	bltnPrintln: {args: 0, variadic: true},
-	bltnReal:    {args: 1, variadic: false},
-	bltnRecover: {args: 0, variadic: false},
+	bltnAlignof:  {args: 1, variadic: false},
+	bltnAppend:   {args: 1, variadic: true},
+	bltnCap:      {args: 1, variadic: false},
+	bltnClose:    {args: 1, variadic: false},
+	bltnComplex:  {args: 2, variadic: false},
+	bltnImag:     {args: 1, variadic: false},
+	bltnCopy:     {args: 2, variadic: false},
+	bltnDelete:   {args: 2, variadic: false},
+	bltnLen:      {args: 1, variadic: false},
+	bltnMake:     {args: 1, variadic: true},
+	bltnNew:      {args: 1, variadic: false},
+	bltnOffsetof: {args: 1, variadic: false},
+	bltnPanic:    {args: 1, variadic: false},
+	bltnPrint:    {args: 0, variadic: true},
+	bltnPrintln:  {args: 0, variadic: true},
+	bltnReal:     {args: 1, variadic: false},
+	bltnRecover:  {args: 0, variadic: false},
+	bltnSizeof:   {args: 1, variadic: false},
 }
 
 func (check typecheck) builtin(name string, n *node, child []*node, ellipsis bool) error {
@@ -821,7 +830,7 @@ func (check typecheck) builtin(name string, n *node, child []*node, ellipsis boo
 		case !typ0.untyped && typ1.untyped:
 			err = check.convertUntyped(p1.nod, typ0)
 		case typ0.untyped && typ1.untyped:
-			fltType := untypedFloat()
+			fltType := untypedFloat(nil)
 			err = check.convertUntyped(p0.nod, fltType)
 			if err != nil {
 				break
@@ -844,7 +853,7 @@ func (check typecheck) builtin(name string, n *node, child []*node, ellipsis boo
 		p := params[0]
 		typ := p.Type()
 		if typ.untyped {
-			if err := check.convertUntyped(p.nod, untypedComplex()); err != nil {
+			if err := check.convertUntyped(p.nod, untypedComplex(nil)); err != nil {
 				return err
 			}
 		}
@@ -922,7 +931,7 @@ func (check typecheck) builtin(name string, n *node, child []*node, ellipsis boo
 				return err
 			}
 		}
-	case bltnRecover, bltnNew:
+	case bltnRecover, bltnNew, bltnAlignof, bltnOffsetof, bltnSizeof:
 		// Nothing to do.
 	default:
 		return n.cfgErrorf("unsupported builtin %s", name)
@@ -1051,7 +1060,7 @@ func (check typecheck) convertUntyped(n *node, typ *itype) error {
 		// Both n and target are untyped.
 		nkind, tkind := ntyp.Kind(), ttyp.Kind()
 		if isNumber(ntyp) && isNumber(ttyp) {
-			if nkind < tkind {
+			if nkind <= tkind {
 				n.typ = typ
 			}
 		} else if nkind != tkind {
@@ -1087,6 +1096,9 @@ func (check typecheck) convertUntyped(n *node, typ *itype) error {
 		if !n.typ.isNil() {
 			return convErr
 		}
+		return nil
+	case n.typ.isNil() && typ.id() == "unsafe.Pointer":
+		n.typ = typ
 		return nil
 	default:
 		return convErr

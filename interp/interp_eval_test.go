@@ -133,6 +133,9 @@ func TestEvalAssign(t *testing.T) {
 		{src: "j := true || _", err: "1:33: cannot use _ as value"},
 		{src: "j := true && _", err: "1:33: cannot use _ as value"},
 		{src: "j := interface{}(int(1)); j.(_)", err: "1:54: cannot use _ as value"},
+		{src: "ff := func() (a, b, c int) {return 1, 2, 3}; x, y, x := ff()", err: "1:73: x repeated on left side of :="},
+		{src: "xx := 1; xx, _ := 2, 3", err: "1:37: no new variables on left side of :="},
+		{src: "1 = 2", err: "1:28: cannot assign to 1 (untyped int constant)"},
 	})
 }
 
@@ -216,6 +219,8 @@ func TestEvalTypeSpec(t *testing.T) {
 	runTests(t, i, []testCase{
 		{src: `type _ struct{}`, err: "1:19: cannot use _ as value"},
 		{src: `a := struct{a, _ int}{32, 0}`, res: "{32 0}"},
+		{src: "type A int; type A = string", err: "1:31: A redeclared in this block"},
+		{src: "type B int; type B string", err: "1:31: B redeclared in this block"},
 	})
 }
 
@@ -540,8 +545,8 @@ func TestEvalSliceExpression(t *testing.T) {
 		{src: `a := (&[]int{0,1,2,3})[1:3]`, err: "1:33: cannot slice type *[]int"},
 		{src: `a := "hello"[1:3:4]`, err: "1:45: invalid operation: 3-index slice of string"},
 		{src: `ar := [3]int{0,1,2}; a := ar[:4]`, err: "1:58: index int is out of bounds"},
-		{src: `a := []int{0,1,2,3}[1::4]`, err: "1:49: 2nd index required in 3-index slice"},
-		{src: `a := []int{0,1,2,3}[1:3:]`, err: "1:51: 3rd index required in 3-index slice"},
+		{src: `a := []int{0,1,2,3}[1::4]`, err: "index required in 3-index slice"},
+		{src: `a := []int{0,1,2,3}[1:3:]`, err: "index required in 3-index slice"},
 		{src: `a := []int{0,1,2}[3:1]`, err: "invalid index values, must be low <= high <= max"},
 		{pre: func() { eval(t, i, `type Str = string; var r Str = "truc"`) }, src: `r[1]`, res: "114"},
 		{src: `_[12]`, err: "1:28: cannot use _ as value"},
@@ -640,6 +645,8 @@ func TestEvalChan(t *testing.T) {
 				return ok && msg == "ping"
 			})()`, res: "true",
 		},
+		{src: `a :=5; a <- 4`, err: "cannot send to non-channel int"},
+		{src: `a :=5; b := <-a`, err: "cannot receive from non-channel int"},
 	})
 }
 
@@ -701,6 +708,7 @@ func TestEvalCall(t *testing.T) {
 		{src: ` test := func(a, b int) int { return a }
 				blah := func() (int, float64) { return 1, 1.1 }
 				a := test(blah())`, err: "3:15: cannot use func() (int,float64) as type (int,int)"},
+		{src: "func f()", err: "missing function body"},
 	})
 }
 
@@ -892,7 +900,7 @@ func eval(t *testing.T, i *interp.Interpreter, src string) reflect.Value {
 	if err != nil {
 		t.Logf("Error: %v", err)
 		if e, ok := err.(interp.Panic); ok {
-			t.Logf(string(e.Stack))
+			t.Log(string(e.Stack))
 		}
 		t.FailNow()
 	}
@@ -914,7 +922,7 @@ func assertEval(t *testing.T, i *interp.Interpreter, src, expectedError, expecte
 	if err != nil {
 		t.Logf("got an error: %v", err)
 		if e, ok := err.(interp.Panic); ok {
-			t.Logf(string(e.Stack))
+			t.Log(string(e.Stack))
 		}
 		t.FailNow()
 	}
@@ -1087,6 +1095,10 @@ func main() {
 }
 
 func TestImportPathIsKey(t *testing.T) {
+	// FIXME(marc): support of stdlib generic packages like "cmp", "maps", "slices" has changed
+	// the scope layout by introducing new source packages when stdlib is used.
+	// The logic of the following test doesn't apply anymore.
+	t.Skip("This test needs to be reworked.")
 	// No need to check the results of Eval, as TestFile already does it.
 	i := interp.New(interp.Options{GoPath: filepath.FromSlash("../_test/testdata/redeclaration-global7")})
 	if err := i.Use(stdlib.Symbols); err != nil {
@@ -1244,10 +1256,9 @@ func TestConcurrentEvals2(t *testing.T) {
 			if hello1 {
 				if l == "hello world2" {
 					break
-				} else {
-					done <- fmt.Errorf("unexpected output: %v", l)
-					return
 				}
+				done <- fmt.Errorf("unexpected output: %v", l)
+				return
 			}
 			if l == "hello world1" {
 				hello1 = true
@@ -1327,7 +1338,7 @@ func TestConcurrentEvals3(t *testing.T) {
 		}()
 
 		for _, v := range input {
-			in := strings.NewReader(fmt.Sprintf("println(\"%s\")\n", v))
+			in := strings.NewReader(fmt.Sprintf("println(%q)\n", v))
 			if _, err := io.Copy(poutin, in); err != nil {
 				t.Fatal(err)
 			}
@@ -1872,26 +1883,50 @@ func TestIssue1383(t *testing.T) {
 			}
 		`
 
-	interp := interp.New(interp.Options{})
-	err := interp.Use(stdlib.Symbols)
+	i := interp.New(interp.Options{})
+	err := i.Use(stdlib.Symbols)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = interp.Eval(`import "fmt"`)
+	_, err = i.Eval(`import "fmt"`)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	ast, err := parser.ParseFile(interp.FileSet(), "_.go", src, parser.DeclarationErrors)
+	ast, err := parser.ParseFile(i.FileSet(), "_.go", src, parser.DeclarationErrors)
 	if err != nil {
 		t.Fatal(err)
 	}
-	prog, err := interp.CompileAST(ast)
+	prog, err := i.CompileAST(ast)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = interp.Execute(prog)
+	_, err = i.Execute(prog)
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestIssue1623(t *testing.T) {
+	var f float64
+	var j int
+	var s string = "foo"
+
+	i := interp.New(interp.Options{})
+	if err := i.Use(interp.Exports{
+		"pkg/pkg": map[string]reflect.Value{
+			"F": reflect.ValueOf(&f).Elem(),
+			"J": reflect.ValueOf(&j).Elem(),
+			"S": reflect.ValueOf(&s).Elem(),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	i.ImportUsed()
+
+	runTests(t, i, []testCase{
+		{desc: "pkg.F = 2.0", src: "pkg.F = 2.0; pkg.F", res: "2"},
+		{desc: "pkg.J = 3", src: "pkg.J = 3; pkg.J", res: "3"},
+		{desc: `pkg.S = "bar"`, src: `pkg.S = "bar"; pkg.S`, res: "bar"},
+	})
 }
